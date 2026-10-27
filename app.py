@@ -1,105 +1,196 @@
-import csv
+"""Fleet BHI integrated research demonstration — synthetic data only."""
+import os
 import io
+import zipfile
+from datetime import date
 import pandas as pd
 import streamlit as st
-from core import (CRITERIA, PARAMETERS, CRITERION_WEIGHTS, DEFAULT_MCDA, FMEA,
-                  ILLUSTRATIVE_LIMITS, Tank, advance, refuel, mcda_weights, calculate_bhi)
+from core import (mcda_weights, DEFAULT_MCDA, CRITERIA, PARAMETERS, FMEA,
+                  calculate_bhi, ILLUSTRATIVE_LIMITS)
+from fleet_db import connect, seed, rows, tank, record_check, record_bunkering, record_sample, update_alert
 
-st.set_page_config(page_title='Biofuel Health Index | Research PoC',layout='wide',page_icon='⚙️')
-st.title('Biofuel Health Index & Commingling Framework')
-st.caption('Harbour craft engineering research prototype | Synthetic inputs only | Not an operational fuel release system')
-st.warning('Research demonstration: BHI weights and 50%-of-limit penalty start points are provisional. Reference thresholds below are user-editable demonstrations, NOT a verified ISO 8217 fuel-grade profile. Any breach is shown separately; do not use this dashboard to authorise bunkering, dosing or sailing.')
+st.set_page_config(page_title='Harbour Craft | BHI Fleet Monitor',layout='wide',page_icon='⚓')
+st.title('Biofuel Health Index · Fleet Management')
+st.caption('Integrated bunkering, commingling and condition-monitoring research prototype | SYNTHETIC DATA ONLY')
+st.warning('NOT an operational approval or fuel certificate. COQ and compatibility confirmation are documented evidence checks, not replaced by BHI. Default limits and scores are illustrative; actual grade limits, test methods and procedures must be verified. SQLite on free cloud hosting may reset: export your demo records.')
+DB_PATH=os.environ.get('BHI_DB_PATH','fleet_demo.db')
+cn=connect(DB_PATH)
+seed(cn)
+weights=mcda_weights()
+limits=ILLUSTRATIVE_LIMITS.copy()
 
 with st.sidebar:
-    st.header('Fuel quality reference profile')
-    st.caption('Confirm limits against the actual fuel grade and standard before any real assessment.')
-    limits={
-      'Water':st.number_input('Water maximum (mg/kg)',min_value=0.001,value=500.0,step=10.0),
-      'TAN':st.number_input('Acid number maximum (mg KOH/g)',min_value=0.001,value=0.50,step=0.05,format='%.3f'),
-      'Oxidation':st.number_input('Oxidation induction minimum (hours)',min_value=0.001,value=8.0,step=0.5)
-    }
-    st.caption('Defaults are illustrative research values, not universally applicable B20–B100 specifications.')
+    page=st.radio('Navigation',['Fleet Overview','1–2 · Pre-bunkering & COQ','3 · Compatibility & review','4 · Bunkering record','5 · Fuel quality & BHI','6 · Alerts & Power BI exports','Scientific validation'],label_visibility='visible')
+    st.divider()
+    st.caption('Research screening reference profile (NOT certified ISO/EN limits)')
+    limits['Water']=st.number_input('Water max · mg/kg',min_value=0.01,value=500.0,step=10.0)
+    limits['TAN']=st.number_input('TAN max · mg KOH/g',min_value=0.001,value=0.50,step=0.05)
+    limits['Oxidation']=st.number_input('Oxidation min · h',min_value=0.01,value=8.0,step=0.5)
+    st.caption('Keep actual fuel grades and applicable ISO 8217 specifications under qualified review.')
 
-p1,p2,p3=st.tabs(['1 | Fuel screening','2 | Commingling simulation','3 | Risk weights & validation'])
-with p3:
-    st.subheader('MCDA: traceable, editable researcher ratings')
-    st.write('Each row is scored from 1 (low) to 5 (high). Criterion importance: consequence 35%, early warning 30%, monitoring practicality 15%, evidence relevance 20%. Both criterion importance and ratings are provisional judgements, not measured risk probabilities.')
-    edited={}
-    cols=st.columns(4)
-    for j,c in enumerate(CRITERIA):
-        cols[j].metric(c,f'{CRITERION_WEIGHTS[j]*100:.0f}%')
-    for p in PARAMETERS:
-        st.markdown(f'**{p}**')
-        fields=st.columns(4)
-        edited[p]=tuple(fields[i].slider(CRITERIA[i],1,5,int(DEFAULT_MCDA[p][i]),key=f'{p}_{i}') for i in range(4))
-    weights=mcda_weights(edited)
-    st.subheader('Calculated relative weights')
-    for p in PARAMETERS: st.metric(p,f'{weights[p]:.2f}%')
-    st.bar_chart(pd.DataFrame({'Parameter':list(weights),'Weight (%)':list(weights.values())}).set_index('Parameter'))
-    st.caption('MCDA values do not establish physical deterioration rates or calibrated engine-failure risk.')
-    st.subheader('FMEA hazard register (separate from weight calculation)')
-    fdf=pd.DataFrame(FMEA,columns=['ID','Indicator','Failure mode','Severity (1–10)','Occurrence (1–5)','Detection difficulty (1–5)'])
-    fdf['RPN']=fdf['Severity (1–10)']*fdf['Occurrence (1–5)']*fdf['Detection difficulty (1–5)']
-    st.dataframe(fdf,use_container_width=True,hide_index=True)
-    st.caption('All FMEA ratings illustrative; the RPN is for hazard prioritisation only, not directly converted into BHI weights.')
-    st.download_button('Export FMEA register (CSV)',fdf.to_csv(index=False),'FMEA_register.csv','text/csv')
+vessels=rows(cn,'SELECT * FROM vessels ORDER BY id')
 
-# Tabs execute in one script run: use computed MCDA weights even if 3rd tab not opened.
-with p1:
-    st.subheader('Synthetic fuel screening')
-    chosen=st.radio('Weight model',['MCDA calculated','Equal thirds','Former 35/35/30','FMEA exploratory 31.8/25.2/43'],horizontal=True)
-    useweights={'MCDA calculated':weights,'Equal thirds':dict.fromkeys(PARAMETERS,100/3),
-        'Former 35/35/30':dict(zip(PARAMETERS,[35,35,30])),
-        'FMEA exploratory 31.8/25.2/43':dict(zip(PARAMETERS,[31.8,25.2,43.0]))}[chosen]
-    x,y,z=st.columns(3)
-    water=x.number_input('Water (mg/kg)',min_value=0.0,value=300.0,step=10.0)
-    tan=y.number_input('TAN (mg KOH/g)',min_value=0.0,value=0.30,step=0.01,format='%.3f')
-    oxidation=z.number_input('Oxidation induction (hours)',min_value=0.01,value=10.0,step=0.5)
-    out=calculate_bhi(water,tan,oxidation,limits,useweights)
-    m1,m2=st.columns(2)
-    m1.metric('Provisional BHI (0–100)',f"{out['score']:.1f}")
-    m2.metric('Independent reference threshold check',out['status'])
-    if out['breaches']: st.error('Threshold breach: '+', '.join(out['breaches'])+'. Refer for expert assessment; BHI never overrides this flag.')
-    elif out['status']=='REVIEW': st.warning('Screening review suggested; not a diagnosis or maintenance instruction.')
-    else: st.success('No specified reference limit breached. This is not a certification of fuel suitability.')
-    detail=pd.DataFrame([{'Parameter':p,'Reference ratio':out['ratios'][p], 'Penalty fraction':out['penalties'][p],'Weight (%)':useweights[p]} for p in PARAMETERS])
-    st.dataframe(detail,use_container_width=True,hide_index=True)
-    st.subheader('Same sample under alternative weights')
-    variants={'MCDA':weights,'Equal thirds':dict.fromkeys(PARAMETERS,100/3), '35/35/30':dict(zip(PARAMETERS,[35,35,30])), 'FMEA exploratory':dict(zip(PARAMETERS,[31.8,25.2,43.0]))}
-    comparison=pd.DataFrame([{'Weighting':k,'BHI':calculate_bhi(water,tan,oxidation,limits,v)['score']} for k,v in variants.items()])
-    st.bar_chart(comparison.set_index('Weighting'))
-    st.download_button('Export score sensitivity (CSV)',comparison.to_csv(index=False),'BHI_weight_comparison.csv','text/csv')
+def pick_vessel(key):
+    v=st.selectbox('Vessel', [x['id'] for x in vessels],key=f'{key}v')
+    ts=rows(cn,'SELECT * FROM tanks WHERE vessel_id=? ORDER BY name',(v,))
+    tid=st.selectbox('Receiving tank', [x['id'] for x in ts], format_func=lambda k: next(x['name'] for x in ts if x['id']==k),key=f'{key}t')
+    return v,tank(cn,tid)
 
-with p2:
-    st.subheader('Recursive effective-age commingling calculation')
-    st.write('Well-mixed approximation. Effective fuel age is a bookkeeping indicator, not predicted oxidation stability, microbial load or TAN.')
-    c1,c2,c3=st.columns(3)
-    initv=c1.number_input('Initial tank fuel (L)',min_value=0.0,value=1000.0,step=50.0)
-    inita=c2.number_input('Initial effective age (days)',min_value=0.0,value=20.0)
-    tankcap=c3.number_input('Tank capacity (L)',min_value=1.0,value=1200.0,step=50.0)
-    records=[]
-    vessel=Tank(initv,inita)
-    st.caption('Three user-adjustable successive bunkering cycles')
-    for i,defaults in enumerate(((10.,800.,800.),(7.,500.,500.),(7.,950.,950.)),1):
-        cols=st.columns(3)
-        days=cols[0].number_input(f'Cycle {i}: elapsed days',min_value=0.0,value=defaults[0],key=f'days{i}')
-        consumed=cols[1].number_input(f'Cycle {i}: consumed (L)',min_value=0.0,value=defaults[1],key=f'cons{i}')
-        delivered=cols[2].number_input(f'Cycle {i}: delivered (L)',min_value=0.0,value=defaults[2],key=f'del{i}')
+if page=='Fleet Overview':
+    st.subheader('Fleet overview')
+    ss=rows(cn,'''SELECT t.*, (SELECT s.bhi FROM samples s WHERE s.tank_id=t.id ORDER BY s.id DESC LIMIT 1) last_bhi, (SELECT s.status FROM samples s WHERE s.tank_id=t.id ORDER BY s.id DESC LIMIT 1) last_status FROM tanks t ORDER BY t.vessel_id,t.name''')
+    pending=cn.execute("SELECT COUNT(*) FROM alerts WHERE status!='Closed'").fetchone()[0]
+    a,b,c=st.columns(3)
+    a.metric('Vessels',len(vessels)); b.metric('Tanks monitored',len(ss)); c.metric('Open / under-review alerts',pending)
+    frame=pd.DataFrame(ss)
+    frame['Condition status']=frame['last_status'].fillna('UNVERIFIED — NO TANK SAMPLE')
+    st.dataframe(frame[['vessel_id','name','volume_l','capacity_l','blend_pct','age_days','last_bhi','Condition status']].rename(columns={'vessel_id':'Vessel','name':'Tank','volume_l':'ROB (L)','capacity_l':'Capacity (L)','blend_pct':'Est. FAME %','age_days':'Recorded effective age (days)','last_bhi':'Last measured BHI'}),hide_index=True,use_container_width=True)
+    st.info('BHI is reported only against a recorded sample. An old sample does not automatically represent the current tank mixture.')
+    st.subheader('Latest bunkering transactions')
+    st.dataframe(pd.DataFrame(rows(cn,'SELECT vessel_id,created_at,bdn_ref,delivered_l,resulting_blend,resulting_age FROM bunkerings ORDER BY id DESC LIMIT 15')),hide_index=True,use_container_width=True)
+
+elif page=='1–2 · Pre-bunkering & COQ':
+    st.subheader('Pre-bunkering assessment and supplier COQ')
+    v,t=pick_vessel('pre')
+    st.write(f"**Recorded ROB:** {t['volume_l']:,.0f} L · **Tank capacity:** {t['capacity_l']:,.0f} L · **Estimated existing blend:** B{t['blend_pct']:.1f} · **Effective age:** {t['age_days']:.2f} days")
+    st.info('First verify tank inventory, incoming grade, vessel approval, supplier COQ and outstanding abnormal-condition records. A completed electronic review does not authorise transfer.')
+    st.write('Continue to the Compatibility & review tab to create the formal reviewed event. This separation is only screen navigation within one integrated record.')
+    st.dataframe(pd.DataFrame(rows(cn,'SELECT id,created_at,incoming_blend,planned_l,coq_ref,review_status FROM checks WHERE tank_id=? ORDER BY id DESC LIMIT 15',(t['id'],))),hide_index=True,use_container_width=True)
+
+elif page=='3 · Compatibility & review':
+    st.subheader('Single integrated fuel-compatibility review')
+    v,t=pick_vessel('compat')
+    maxb=next(x['approved_max_fame'] for x in vessels if x['id']==v)
+    with st.form('compat_review'):
+        c1,c2=st.columns(2)
+        incoming=c1.selectbox('Incoming B grade (%)',[0,20,30,50,100],index=3)
+        planned=c2.number_input('Planned delivery (L)',min_value=1.0,value=1000.0,step=50.0)
+        coq=st.text_input('Supplier COQ reference (mandatory)')
+        oem=st.checkbox('Vessel / engine approval confirmed for incoming grade and system')
+        compat=st.checkbox('Fuel-to-fuel compatibility evidence reviewed and accepted')
+        approval_ref=st.text_input('Approval / compatibility evidence reference')
+        reviewer=st.text_input('Authorised reviewer name / ID')
+        notes=st.text_area('Evidence review and comments (including concerns)',height=80)
+        predicted=(t['volume_l']*t['blend_pct']+planned*incoming)/(t['volume_l']+planned)
+        st.write(f"**Predicted homogeneous blend: B{predicted:.2f}** · **Expected tank: {t['volume_l']+planned:,.0f} L** · Vessel recorded approved maximum: B{maxb:.0f}")
+        st.caption('Blend % is a volume-fraction approximation, not an experimental miscibility/stability test. The incoming grade must independently satisfy equipment approval.')
+        submitted=st.form_submit_button('Save review decision')
+    if submitted:
         try:
-            residual=advance(vessel,days,consumed)
-            updated=refuel(residual,delivered)
-            if updated.volume_l>tankcap: st.warning(f'Cycle {i}: exceeds stated tank capacity.')
-            records.append({'Cycle':i,'Elapsed days':days,'Consumed L':consumed,'ROB before delivery L':residual.volume_l,'Bunkered L':delivered,'Final tank L':updated.volume_l,'Effective age days':round(updated.age_days,4)})
-            vessel=updated
-        except ValueError as exc:
-            st.error(f'Cycle {i}: {exc}. Change inputs to continue.')
-            break
-    if records:
-        df=pd.DataFrame(records)
-        st.dataframe(df,use_container_width=True,hide_index=True)
-        st.line_chart(df.set_index('Cycle')['Effective age days'])
-        st.download_button('Export commingling history (CSV)',df.to_csv(index=False),'commingling_history.csv','text/csv')
-    st.info('5% ROB is NOT treated as a safe reset. A low residual volume may still contain contaminants or sediments.')
+            checkid,status=record_check(cn,vessel=v,tank_id=t['id'],incoming_blend=incoming,planned_l=planned,coq_ref=coq,approved=oem,compatible=compat,approval_ref=approval_ref,reviewer=reviewer,notes=notes)
+            (st.success if status=='Reviewed' else st.warning)(f'Review #{checkid}: {status}. '+('Proceed to recording completed bunkering only under approved operating procedures.' if status=='Reviewed' else 'Evidence incomplete or approval not established.'))
+        except ValueError as ex: st.error(str(ex))
+    st.dataframe(pd.DataFrame(rows(cn,'SELECT id,created_at,coq_ref,planned_l,incoming_blend,review_status FROM checks WHERE tank_id=? ORDER BY id DESC LIMIT 8',(t['id'],))),hide_index=True,use_container_width=True)
+
+elif page=='4 · Bunkering record':
+    st.subheader('Record completed bunkering and commingling')
+    v,t=pick_vessel('bunk')
+    checks=rows(cn,"SELECT * FROM checks WHERE tank_id=? AND review_status='Reviewed' AND NOT EXISTS (SELECT 1 FROM bunkerings b WHERE b.notes LIKE '%[check:' || checks.id || ']%') ORDER BY id DESC",(t['id'],))
+    if not checks:
+        st.warning('No unused reviewed pre-bunkering records for this tank. Complete the compatibility review first.')
+    else:
+        cid=st.selectbox('Reviewed pre-bunkering event',[x['id'] for x in checks],format_func=lambda i:next(f"Review #{x['id']} · {x['coq_ref']} · {x['planned_l']:,.0f} L planned" for x in checks if x['id']==i))
+        chosen=next(x for x in checks if x['id']==cid)
+        with st.form('bunk_form'):
+            rob=st.number_input('Verified ROB before transfer (L)',min_value=0.0,value=float(t['volume_l']))
+            qty=st.number_input('Actual delivered volume (L)',min_value=0.01,value=float(chosen['planned_l']))
+            elapsed=st.number_input('Elapsed days since inventory age timestamp (days)',min_value=0.0,value=0.0,help='Use 0 if ages were already updated to the current bunkering date. Avoid double-counting elapsed time.')
+            supplier=st.text_input('Supplier')
+            bdn=st.text_input('Bunker delivery note reference')
+            sample=st.text_input('Representative sample / seal reference')
+            notes=st.text_area('Observations (do not enter confidential real fleet data)')
+            posted=st.form_submit_button('Reconcile and save bunkering')
+        if posted:
+            try:
+                rid,blend,age=record_bunkering(cn,check_id=cid,actual_rob=rob,actual_delivered=qty,elapsed_days=elapsed,bdn_ref=bdn,sample_ref=sample,supplier=supplier,notes=notes)
+                st.success(f'Saved BDN transaction #{rid}. Estimated blend B{blend:.2f}; effective age {age:.3f} days. Chemical condition UNVERIFIED pending representative measurements.')
+                st.rerun()
+            except ValueError as ex: st.error(str(ex))
+    st.caption('Transfer and sampling take place under the operator’s existing safety procedures. This app is only a recordkeeping and decision-support tool.')
+    st.dataframe(pd.DataFrame(rows(cn,'SELECT id,created_at,bdn_ref,delivered_l,resulting_blend,resulting_age FROM bunkerings WHERE tank_id=? ORDER BY id DESC LIMIT 15',(t['id'],))),hide_index=True,use_container_width=True)
+
+elif page=='5 · Fuel quality & BHI':
+    st.subheader('Representative sample assessment')
+    v,t=pick_vessel('sample')
+    st.warning('Do not copy incoming COQ values into the commingled tank sample. The new tank condition must be supported by a relevant, representative sample result.')
+    with st.form('sample_form'):
+        x,y=st.columns(2)
+        ref=x.text_input('Tank sample reference')
+        lab=y.text_input('Testing laboratory / authorised measurement provider')
+        taken=st.date_input('Sample collection date',value=date.today())
+        method=st.text_input('Test methods / report reference')
+        cols=st.columns(3)
+        water=cols[0].number_input('Water (mg/kg)',min_value=0.0,value=300.0)
+        tan=cols[1].number_input('TAN (mg KOH/g)',min_value=0.0,value=0.30,format='%.3f')
+        oxidation=cols[2].number_input('Oxidation stability (h)',min_value=0.01,value=10.0)
+        notes=st.text_area('Additional sample limitations / remarks')
+        submitted=st.form_submit_button('Record measured sample and calculate provisional BHI')
+    if submitted:
+        try:
+            rid,res=record_sample(cn,vessel=v,tank_id=t['id'],taken_at=taken.isoformat(),ref=ref,laboratory=lab,method_ref=method,water=water,tan=tan,oxidation=oxidation,limits=limits,weights=weights,notes=notes)
+            st.metric('Recorded provisional BHI',f"{res['score']:.1f} / 100")
+            if res['breaches']: st.error('REFERENCE LIMIT BREACH — '+', '.join(res['breaches'])+'; escalate for qualified review.')
+            else: st.info('Screening status: '+res['status']+' (not a fuel suitability certificate).')
+            st.success(f'Sample result #{rid} saved.')
+        except ValueError as ex: st.error(str(ex))
+    st.subheader('Recorded sample history')
+    history=pd.DataFrame(rows(cn,'SELECT taken_at,sample_ref,laboratory,water,tan,oxidation,bhi,status FROM samples WHERE tank_id=? ORDER BY id DESC',(t['id'],)))
+    st.dataframe(history,use_container_width=True,hide_index=True)
+    if len(history)>1:
+        st.line_chart(history.iloc[::-1].set_index('taken_at')['bhi'])
+
+elif page=='6 · Alerts & Power BI exports':
+    st.subheader('Exceptions, review and management exports')
+    alarms=rows(cn,'SELECT * FROM alerts ORDER BY id DESC')
+    st.dataframe(pd.DataFrame(alarms),use_container_width=True,hide_index=True)
+    openalerts=[a for a in alarms if a['status']!='Closed']
+    if openalerts:
+        with st.form('alert_form'):
+            aid=st.selectbox('Alert to update',[x['id'] for x in openalerts],format_func=lambda x:f'#{x} · '+next(z['details'][:80] for z in openalerts if z['id']==x))
+            status=st.selectbox('Workflow status',['Open','Under review','Closed'])
+            owner=st.text_input('Responsible reviewer')
+            action=st.text_area('Investigation and documented actions')
+            submitted=st.form_submit_button('Save alert update')
+        if submitted:
+            try:
+                update_alert(cn,aid,status,owner,action)
+                st.success('Updated alert record.');st.rerun()
+            except ValueError as ex: st.error(str(ex))
+    st.subheader('Download datasets for Microsoft Power BI Desktop')
+    st.caption('These exports are synthetic demonstration data. Power BI can import these CSV files and link them using vessel_id and tank_id.')
+    for entity in ('vessels','tanks','checks','bunkerings','samples','alerts'):
+        dat=pd.DataFrame(rows(cn,f'SELECT * FROM {entity}'))
+        st.download_button(f'Download {entity}.csv',dat.to_csv(index=False).encode(),file_name=f'{entity}.csv',mime='text/csv',key=f'csv{entity}')
+    archive=io.BytesIO()
+    with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
+        for entity in ('vessels','tanks','checks','bunkerings','samples','alerts'):
+            dat=pd.DataFrame(rows(cn,f'SELECT * FROM {entity}'))
+            z.writestr(f'{entity}.csv',dat.to_csv(index=False))
+    st.download_button('Download all 6 CSVs for Power BI (ZIP)',archive.getvalue(),'fleet_powerbi_exports.zip','application/zip')
+
+elif page=='Scientific validation':
+    st.subheader('FMEA–MCDA research basis')
+    st.write('Criteria weighted 35% consequences, 30% early warning, 15% monitoring practicality, 20% evidence relevance. Researcher ratings are provisional, not laboratory calibrated.')
+    values={}
+    for param in PARAMETERS:
+        cols=st.columns(4)
+        st.markdown('**'+param+'**')
+        values[param]=tuple(cols[j].slider(f'{CRITERIA[j]} — {param}',1,5,int(DEFAULT_MCDA[param][j]),key=f'{param}{j}') for j in range(4))
+    new_weights=mcda_weights(values)
+    st.dataframe(pd.DataFrame([{'Parameter':p,'Calculated relative weight (%)':round(new_weights[p],3)} for p in PARAMETERS]),use_container_width=True,hide_index=True)
+    st.bar_chart(pd.DataFrame({'Parameter':list(new_weights),'Weight':list(new_weights.values())}).set_index('Parameter'))
+    fmea=pd.DataFrame(FMEA,columns=['ID','Parameter','Failure mode','Severity','Occurrence','Detection difficulty'])
+    fmea['RPN']=fmea.Severity*fmea.Occurrence*fmea['Detection difficulty']
+    st.dataframe(fmea,use_container_width=True,hide_index=True)
+    st.caption('FMEA identifies hazards; MCDA generates provisional weights. Ratings are subjective. A numerical BHI is never proof of fuel compatibility or safety.')
+    st.subheader('Sample weight sensitivity')
+    cols=st.columns(3)
+    water=cols[0].number_input('Water measurement',value=300.0,min_value=0.0)
+    tan=cols[1].number_input('TAN measurement',value=0.30,min_value=0.0)
+    oxidation=cols[2].number_input('Oxidation measurement',value=10.0,min_value=0.01)
+    schemes={'Editable MCDA':new_weights,'Equal thirds':{p:100/3 for p in PARAMETERS},'Former 35/35/30':dict(zip(PARAMETERS,[35,35,30])),'Exploratory FMEA':dict(zip(PARAMETERS,[31.8,25.2,43]))}
+    st.dataframe(pd.DataFrame([{'Scheme':k,'Provisional BHI':round(calculate_bhi(water,tan,oxidation,limits,w)['score'],2)} for k,w in schemes.items()]),hide_index=True,use_container_width=True)
+    st.info('Validation scope: deterministic formula and workflow tests only. Physical blend compatibility, fuel-grade conformity and degradation prediction require independently appropriate evidence and laboratory testing.')
 
 st.divider()
-st.caption('Scientific grounding: NREL Biodiesel Handling and Use Guide (2023); ISO 8217:2024 and MPA Singapore biofuel bunkering framework. Compliance requires a verified applicable grade, sampling and qualified review. No live laboratory data is used.')
+st.caption('Academic research demonstrator — not affiliated with or deployed by PSA Marine. Only synthetic data should be entered into a public Streamlit application.')
