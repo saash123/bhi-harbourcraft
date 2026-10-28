@@ -27,7 +27,12 @@ def seed(cn):
         for v,maxb in [('TG01',50),('TG02',100),('TG03',30),('TG04',100),('TG05',50)]:
             cn.execute('INSERT INTO vessels VALUES(?,?,?)',(v,'Synthetic harbour tug',maxb))
             for t in ('Port','Starboard'):
-                cn.execute('INSERT INTO tanks(vessel_id,name,capacity_l,volume_l,blend_pct,age_days,updated_at) VALUES(?,?,?,?,?,?,?)',(v,t,5000,1000,20 if v=='TG01' else 20,14,now()))
+                # TG01 starts before its first biofuel delivery (empty synthetic receiving tanks).
+                # The other vessels demonstrate different pre-existing synthetic residence ages.
+                starting_age = {'TG01': 0, 'TG02': 45, 'TG03': 90, 'TG04': 150, 'TG05': 210}[v]
+                starting_volume = 0 if v == 'TG01' else 1000
+                cn.execute('INSERT INTO tanks(vessel_id,name,capacity_l,volume_l,blend_pct,age_days,updated_at) VALUES(?,?,?,?,?,?,?)',
+                           (v,t,5000,starting_volume,0 if v == 'TG01' else 20,starting_age,now()))
 
 def rows(cn,query,args=()): return [dict(x) for x in cn.execute(query,args).fetchall()]
 
@@ -84,3 +89,13 @@ def update_alert(cn,alert_id,status,owner,action):
     if status=='Closed' and (not owner.strip() or not action.strip()): raise ValueError('Owner and action needed for closure')
     with cn:
         cn.execute('UPDATE alerts SET status=?,owner=?,action=?,closed_at=? WHERE id=?',(status,owner,action,now() if status=='Closed' else None,alert_id))
+
+
+def reset_demo(cn):
+    """Restore synthetic starter records in a single transaction; never delete schema."""
+    with cn:
+        for table in ('alerts', 'samples', 'bunkerings', 'checks', 'tanks', 'vessels'):
+            cn.execute(f'DELETE FROM {table}')
+    seed(cn)
+    return {'vessels': cn.execute('SELECT COUNT(*) FROM vessels').fetchone()[0],
+            'tanks': cn.execute('SELECT COUNT(*) FROM tanks').fetchone()[0]}

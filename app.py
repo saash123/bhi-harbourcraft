@@ -25,6 +25,7 @@ from fleet_db import (
     record_bunkering,
     record_sample,
     update_alert,
+    reset_demo,
 )
 
 st.set_page_config(page_title="BHI Fleet Monitor", layout="wide", page_icon="⚓")
@@ -90,8 +91,8 @@ def show_tank_snapshot(vessel_id, t):
     c3.metric("Recorded fuel", f"B{t['blend_pct']:.1f}")
     c4.metric("Effective fuel age", f"{t['age_days']:.2f} d")
     st.caption(
-        f"Vessel recorded maximum approved biodiesel blend: B{vessel_max(vessel_id):.0f}. "
-        "Use only synthetic data in this public demo."
+        f"Vessel's simulated maximum approved biodiesel blend: B{vessel_max(vessel_id):.0f}. "
+        + ("TG01 starts before its first biofuel bunkering." if vessel_id == "TG01" else "Existing effective age is an assumed synthetic starting value.")
     )
 
 
@@ -114,6 +115,7 @@ with st.sidebar:
             "4 · Tank sample & BHI",
             "5 · Alerts & exports",
             "6 · Scientific basis",
+            "Settings & reset",
         ],
         label_visibility="collapsed",
     )
@@ -124,9 +126,19 @@ with st.sidebar:
         limits["TAN"] = st.number_input("TAN max (mg KOH/g)", min_value=0.001, value=0.50, step=0.05)
         limits["Oxidation"] = st.number_input("Oxidation min (h)", min_value=0.01, value=8.0, step=0.5)
     st.caption("Keep real vessel approvals and actual marine-fuel specifications under qualified review.")
+    st.divider()
+    st.caption("Demo controls")
+    if st.button("Reset demo data", use_container_width=True, help="Opens reset confirmation; no data is removed yet."):
+        st.session_state["page_reset_requested"] = True
+
+
+if st.session_state.pop("page_reset_requested", False):
+    st.session_state["show_reset_dialog"] = True
 
 st.title("Biofuel Health Index · Fleet Management")
-st.caption("Simple fleet workflow for bunkering, fuel-age tracking and tank-sample screening | SYNTHETIC DATA ONLY")
+st.caption("Bunkering records • fuel-age tracking • tank samples • alerts | DEMONSTRATION DATA")
+if st.session_state.get("show_reset_dialog", False):
+    st.warning("**Reset requested:** Open **Settings & reset** in the navigation, review the warning and confirm there. No records have been deleted.")
 st.markdown(
     """
 <div class="hero-box">
@@ -158,7 +170,7 @@ if page == "Overview":
 
     frame = pd.DataFrame(snapshot)
     if not frame.empty:
-        frame["Condition status"] = frame["last_status"].fillna("UNVERIFIED — NO TANK SAMPLE")
+        frame["Condition status"] = frame["last_status"].fillna("NO TANK SAMPLE")
         frame = frame.rename(
             columns={
                 "vessel_id": "Vessel",
@@ -199,9 +211,7 @@ elif page == "1 · Pre-bunkering":
         st.checkbox("No confidential real data entered into this public demo", value=True, disabled=True)
     with right:
         st.markdown("#### What happens next")
-        st.info(
-            "Go to **Step 2 — Incoming fuel review** to record the planned delivery, COQ reference, incoming fuel grade, and reviewer confirmation."
-        )
+        st.info("Next, open **2 · Incoming fuel review**. Enter the planned quantity and COQ reference, then complete the review.")
 
     history = pd.DataFrame(
         rows(
@@ -486,6 +496,25 @@ elif page == "5 · Alerts & exports":
         file_name="fleet_powerbi_exports.zip",
         mime="application/zip",
     )
+
+elif page == "Settings & reset":
+    st.subheader("Settings & reset")
+    st.markdown("### Restore the demonstration fleet")
+    st.write("Resetting removes **all saved bunkering reviews, deliveries, tank samples and alerts** from this demonstration database, then recreates the five sample vessels.")
+    st.info("**New starting condition:** TG01 has 0 L biodiesel ROB (first delivery not started). TG02, TG03, TG04 and TG05 have assumed synthetic effective ages of 45, 90, 150 and 210 days, respectively. All tanks have a simulated capacity of 5,000 L.")
+    st.warning("This reset affects the shared demo database used by this running application. Download exports before resetting if you need to keep your results. The operation cannot be undone.")
+    with st.form("confirm_reset_form"):
+        understood = st.checkbox("I understand that the current demonstration records will be permanently deleted.")
+        reset_text = st.text_input("Type RESET to confirm", value="")
+        confirmed = st.form_submit_button("Reset all demo records", type="primary", use_container_width=True)
+    if confirmed:
+        if understood and reset_text.strip() == "RESET":
+            counts = reset_demo(cn)
+            st.session_state["show_reset_dialog"] = False
+            st.success(f"Demo reset complete. {counts['vessels']} vessels and {counts['tanks']} tanks restored to their starting conditions.")
+            st.info("Open **Overview** or **1 · Pre-bunkering** to start a fresh scenario.")
+        else:
+            st.error("Reset cancelled. Select the confirmation checkbox and type RESET exactly.")
 
 elif page == "6 · Scientific basis":
     st.subheader("Step 6 — Scientific basis")
