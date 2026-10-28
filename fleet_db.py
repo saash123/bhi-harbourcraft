@@ -6,9 +6,9 @@ from pathlib import Path
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS vessels(id TEXT PRIMARY KEY, description TEXT, approved_max_fame REAL);
 CREATE TABLE IF NOT EXISTS tanks(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,name TEXT NOT NULL,capacity_l REAL NOT NULL,volume_l REAL NOT NULL,blend_pct REAL NOT NULL,age_days REAL NOT NULL,updated_at TEXT NOT NULL, UNIQUE(vessel_id,name));
-CREATE TABLE IF NOT EXISTS bunkerings(id INTEGER PRIMARY KEY AUTOINCREMENT, vessel_id TEXT NOT NULL,tank_id INTEGER NOT NULL,created_at TEXT NOT NULL, supplier TEXT, coq_ref TEXT, bdn_ref TEXT, sample_ref TEXT, incoming_blend REAL, delivered_l REAL, rob_l REAL, old_blend REAL, resulting_blend REAL, resulting_age REAL, approval_ref TEXT, compat_evidence TEXT, reviewer TEXT, notes TEXT);
+CREATE TABLE IF NOT EXISTS bunkerings(id INTEGER PRIMARY KEY AUTOINCREMENT, vessel_id TEXT NOT NULL,tank_id INTEGER NOT NULL,created_at TEXT NOT NULL, supplier TEXT, coq_ref TEXT, bdn_ref TEXT, sample_ref TEXT, incoming_blend REAL, delivered_l REAL, rob_l REAL, old_blend REAL, resulting_blend REAL, resulting_age REAL, approval_ref TEXT, compat_evidence TEXT, reviewer TEXT, notes TEXT, previous_age REAL, previous_updated_at TEXT);
 CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY AUTOINCREMENT, vessel_id TEXT NOT NULL,tank_id INTEGER NOT NULL,taken_at TEXT NOT NULL, entered_at TEXT NOT NULL, sample_ref TEXT, laboratory TEXT, method_ref TEXT, water REAL, tan REAL, oxidation REAL, bhi REAL, status TEXT, weight_model TEXT, limit_profile TEXT, notes TEXT);
-CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,category TEXT NOT NULL,severity TEXT NOT NULL,details TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Open',owner TEXT,action TEXT,closed_at TEXT,sample_id INTEGER);
+CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,category TEXT NOT NULL,severity TEXT NOT NULL,details TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Open',owner TEXT,action TEXT,closed_at TEXT,sample_id INTEGER, bunkering_id INTEGER);
 CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,incoming_blend REAL,planned_l REAL,coq_ref TEXT,approved INTEGER,compatible INTEGER,approval_ref TEXT,reviewer TEXT,notes TEXT,review_status TEXT);
 '''
 
@@ -24,6 +24,13 @@ def connect(path='fleet_demo.db'):
     if 'sample_id' not in columns:
         cn.execute('ALTER TABLE alerts ADD COLUMN sample_id INTEGER')
         cn.commit()
+    bunk_cols = {r[1] for r in cn.execute('PRAGMA table_info(bunkerings)')}
+    for name, dtype in [('previous_age', 'REAL'), ('previous_updated_at', 'TEXT')]:
+        if name not in bunk_cols:
+            cn.execute(f'ALTER TABLE bunkerings ADD COLUMN {name} {dtype}')
+    if 'bunkering_id' not in {r[1] for r in cn.execute('PRAGMA table_info(alerts)')}:
+        cn.execute('ALTER TABLE alerts ADD COLUMN bunkering_id INTEGER')
+    cn.commit()
     return cn
 
 def seed(cn):
@@ -73,8 +80,8 @@ def record_bunkering(cn,*,check_id,actual_rob,actual_delivered,elapsed_days,bdn_
         new=refuel(Tank(actual_rob,t['age_days']+elapsed_days),actual_delivered)
         blend=(actual_rob*t['blend_pct']+actual_delivered*check['incoming_blend'])/new.volume_l
         cn.execute('UPDATE tanks SET volume_l=?,blend_pct=?,age_days=?,updated_at=? WHERE id=?',(new.volume_l,blend,new.age_days,now(),t['id']))
-        cur=cn.execute('''INSERT INTO bunkerings(vessel_id,tank_id,created_at,supplier,coq_ref,bdn_ref,sample_ref,incoming_blend,delivered_l,rob_l,old_blend,resulting_blend,resulting_age,approval_ref,compat_evidence,reviewer,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(check['vessel_id'],t['id'],now(),supplier,check['coq_ref'],bdn_ref,sample_ref,check['incoming_blend'],actual_delivered,actual_rob,t['blend_pct'],blend,new.age_days,check['approval_ref'],'Reviewer confirmed' if check['compatible'] else 'Pending',check['reviewer'],notes+f' [check:{check_id}]'))
-        cn.execute('INSERT INTO alerts(vessel_id,tank_id,created_at,category,severity,details,status) VALUES(?,?,?,?,?,?,?)',(check['vessel_id'],t['id'],now(),'Testing status','Review','New commingled tank condition not measured; representative sample required if indicated by monitoring policy.','Open'))
+        cur=cn.execute('''INSERT INTO bunkerings(vessel_id,tank_id,created_at,supplier,coq_ref,bdn_ref,sample_ref,incoming_blend,delivered_l,rob_l,old_blend,resulting_blend,resulting_age,approval_ref,compat_evidence,reviewer,notes,previous_age,previous_updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(check['vessel_id'],t['id'],now(),supplier,check['coq_ref'],bdn_ref,sample_ref,check['incoming_blend'],actual_delivered,actual_rob,t['blend_pct'],blend,new.age_days,check['approval_ref'],'Reviewer confirmed' if check['compatible'] else 'Pending',check['reviewer'],notes+f' [check:{check_id}]',t['age_days'],t['updated_at']))
+        cn.execute('INSERT INTO alerts(vessel_id,tank_id,created_at,category,severity,details,status,bunkering_id) VALUES(?,?,?,?,?,?,?,?)',(check['vessel_id'],t['id'],now(),'Testing status','Review','New commingled tank condition not measured; representative sample required if indicated by monitoring policy.','Open',cur.lastrowid))
         return cur.lastrowid,blend,new.age_days
 
 def record_sample(cn,*,vessel,tank_id,taken_at,ref,laboratory,method_ref,water,tan,oxidation,limits,weights,notes):
@@ -103,6 +110,41 @@ def delete_sample(cn, *, sample_id, tank_id):
         cn.execute('DELETE FROM alerts WHERE sample_id=?', (sample_id,))
         cn.execute('DELETE FROM samples WHERE id=? AND tank_id=?', (sample_id, tank_id))
     return count
+
+
+def delete_review(cn, *, review_id, tank_id):
+    """Delete an unused review; never remove the approval trail of recorded bunkering."""
+    with cn:
+        r=cn.execute('SELECT * FROM checks WHERE id=? AND tank_id=?',(review_id,tank_id)).fetchone()
+        if r is None: raise ValueError('Review not found for selected tank')
+        used=cn.execute("SELECT 1 FROM bunkerings WHERE tank_id=? AND notes LIKE ?",(tank_id,f'%[check:{review_id}]%')).fetchone()
+        if used: raise ValueError('This review was used for bunkering. Delete the associated bunkering first.')
+        cn.execute('DELETE FROM checks WHERE id=? AND tank_id=?',(review_id,tank_id))
+
+
+def delete_bunkering(cn, *, bunkering_id, tank_id):
+    """Rollback only the latest bunkering when a reliable pre-event snapshot exists.
+
+    Refuse if later samples or other transactions depend on this inventory state.
+    Existing legacy records without saved snapshots are intentionally protected.
+    """
+    with cn:
+        r=cn.execute('SELECT * FROM bunkerings WHERE id=? AND tank_id=?',(bunkering_id,tank_id)).fetchone()
+        if r is None: raise ValueError('Bunkering record not found for selected tank')
+        latest=cn.execute('SELECT MAX(id) FROM bunkerings WHERE tank_id=?',(tank_id,)).fetchone()[0]
+        if r['id']!=latest: raise ValueError('Only the latest bunkering can be reversed, to preserve fuel history.')
+        if r['previous_age'] is None or r['previous_updated_at'] is None:
+            raise ValueError('This older record has no saved pre-bunkering age snapshot; safe reversal is unavailable. Reset the demo if necessary.')
+        dependent=cn.execute('SELECT 1 FROM samples WHERE tank_id=? AND entered_at>=? LIMIT 1',(tank_id,r['created_at'])).fetchone()
+        if dependent: raise ValueError('Tank samples were entered after this bunkering. Delete those samples first, then retry.')
+        current=tank(cn,tank_id)
+        expected=r['rob_l']+r['delivered_l']
+        if abs(current['volume_l']-expected)>0.01 or abs(current['age_days']-r['resulting_age'])>1e-6:
+            raise ValueError('Tank state has changed since the bunkering. Cannot safely reverse this record.')
+        cn.execute('UPDATE tanks SET volume_l=?,blend_pct=?,age_days=?,updated_at=? WHERE id=?',
+                   (r['rob_l'],r['old_blend'],r['previous_age'],r['previous_updated_at'],tank_id))
+        cn.execute('DELETE FROM alerts WHERE bunkering_id=?',(bunkering_id,))
+        cn.execute('DELETE FROM bunkerings WHERE id=? AND tank_id=?',(bunkering_id,tank_id))
 
 
 def update_alert(cn,alert_id,status,owner,action):

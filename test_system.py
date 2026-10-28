@@ -1,5 +1,5 @@
 import os, tempfile, unittest
-from fleet_db import connect,seed,rows,record_check,record_bunkering,record_sample,update_alert,tank,reset_demo,delete_sample
+from fleet_db import connect,seed,rows,record_check,record_bunkering,record_sample,update_alert,tank,reset_demo,delete_sample,delete_review,delete_bunkering
 from core import mcda_weights,ILLUSTRATIVE_LIMITS
 
 class IntegratedTests(unittest.TestCase):
@@ -16,6 +16,35 @@ class IntegratedTests(unittest.TestCase):
         first=rows(self.cn,"SELECT * FROM tanks WHERE vessel_id='TG01' AND name='Port'")[0]
         self.assertEqual(first['volume_l'],0)
         self.assertEqual(first['age_days'],0)
+
+    def test_delete_unused_review(self):
+        review_id,_=self.review()
+        delete_review(self.cn,review_id=review_id,tank_id=self.t['id'])
+        self.assertEqual(len(rows(self.cn,'SELECT * FROM checks')),0)
+
+    def test_cannot_delete_used_review(self):
+        review_id,_=self.review()
+        record_bunkering(self.cn,check_id=review_id,actual_rob=1000,actual_delivered=800,elapsed_days=3,bdn_ref='BDN',sample_ref='S',supplier='X',notes='')
+        with self.assertRaises(ValueError):
+            delete_review(self.cn,review_id=review_id,tank_id=self.t['id'])
+
+    def test_reverse_latest_bunkering_restores_tank(self):
+        original=tank(self.cn,self.t['id'])
+        review_id,_=self.review()
+        bunkering_id,_,_=record_bunkering(self.cn,check_id=review_id,actual_rob=1000,actual_delivered=800,elapsed_days=3,bdn_ref='BDN',sample_ref='S',supplier='X',notes='')
+        delete_bunkering(self.cn,bunkering_id=bunkering_id,tank_id=self.t['id'])
+        restored=tank(self.cn,self.t['id'])
+        for col in ('volume_l','age_days','blend_pct'):
+            self.assertEqual(original[col],restored[col])
+        self.assertEqual(len(rows(self.cn,'SELECT * FROM bunkerings')),0)
+        self.assertEqual(len(rows(self.cn,'SELECT * FROM alerts')),0)
+
+    def test_reverse_bunkering_with_sample_blocked(self):
+        review_id,_=self.review()
+        bunkering_id,_,_=record_bunkering(self.cn,check_id=review_id,actual_rob=1000,actual_delivered=800,elapsed_days=3,bdn_ref='BDN',sample_ref='S',supplier='X',notes='')
+        record_sample(self.cn,vessel='TG02',tank_id=self.t['id'],taken_at='2026-10-28',ref='S',laboratory='Lab',method_ref='M',water=100,tan=.1,oxidation=12,limits=ILLUSTRATIVE_LIMITS,weights=mcda_weights(),notes='')
+        with self.assertRaises(ValueError):
+            delete_bunkering(self.cn,bunkering_id=bunkering_id,tank_id=self.t['id'])
 
     def test_reset_restores_demo_state(self):
         self.review()

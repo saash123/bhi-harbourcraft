@@ -25,6 +25,8 @@ from fleet_db import (
     record_bunkering,
     record_sample,
     delete_sample,
+    delete_review,
+    delete_bunkering,
     update_alert,
     reset_demo,
 )
@@ -290,6 +292,22 @@ elif page == "2 · Incoming fuel review":
     st.markdown("#### Recent review records")
     dataframe_or_message(recent, "No reviews yet.")
 
+    review_items = rows(cn, "SELECT id,created_at,coq_ref,planned_l,review_status FROM checks WHERE tank_id=? ORDER BY id DESC", (t["id"],))
+    if review_items:
+        with st.expander("Correct a mistaken entry — delete a review"):
+            choices = {r["id"]: r for r in review_items}
+            chosen_id = st.selectbox("Review to delete", list(choices),
+                format_func=lambda x: f"#{x} · {choices[x]['coq_ref'] or 'No COQ'} · {choices[x]['planned_l']:,.0f} L · {choices[x]['review_status']}",
+                key=f"remove_review_{t['id']}")
+            confirmed = st.checkbox("I understand this permanently removes the selected review",key=f"confirm_review_{t['id']}_{chosen_id}")
+            if st.button("Delete selected review", disabled=not confirmed, key=f"delete_review_{t['id']}"):
+                try:
+                    delete_review(cn, review_id=chosen_id, tank_id=t["id"])
+                    st.success(f"Review #{chosen_id} deleted.")
+                    st.rerun()
+                except ValueError as ex:
+                    st.error(str(ex))
+
 elif page == "3 · Bunkering record":
     st.subheader("Step 3 — Bunkering record")
     st.markdown(
@@ -369,6 +387,23 @@ elif page == "3 · Bunkering record":
     )
     st.markdown("#### Bunkering history for this tank")
     dataframe_or_message(history, "No bunkering records yet.")
+
+    bunkering_items = rows(cn, "SELECT id,created_at,bdn_ref,delivered_l FROM bunkerings WHERE tank_id=? ORDER BY id DESC", (t["id"],))
+    if bunkering_items:
+        with st.expander("Correct a mistaken entry — reverse a bunkering"):
+            st.warning("Only the most recent bunkering can be reversed. Sample records entered afterwards must be deleted first. Older records without rollback data cannot be reversed safely.")
+            choices = {r["id"]:r for r in bunkering_items}
+            chosen_id = st.selectbox("Bunkering to reverse", list(choices),
+                format_func=lambda x: f"#{x} · {choices[x]['bdn_ref']} · {choices[x]['delivered_l']:,.0f} L",
+                key=f"reverse_bunk_{t['id']}")
+            confirmed = st.checkbox("I understand this restores the tank to its previous recorded state",key=f"confirm_bunk_{t['id']}_{chosen_id}")
+            if st.button("Reverse selected bunkering",disabled=not confirmed,key=f"delete_bunk_{t['id']}"):
+                try:
+                    delete_bunkering(cn,bunkering_id=chosen_id,tank_id=t["id"])
+                    st.success(f"Bunkering #{chosen_id} reversed; tank inventory and age restored.")
+                    st.rerun()
+                except ValueError as ex:
+                    st.error(str(ex))
 
 elif page == "4 · Tank sample & BHI":
     st.subheader("Step 4 — Tank sample and BHI")
