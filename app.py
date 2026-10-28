@@ -24,6 +24,7 @@ from fleet_db import (
     record_check,
     record_bunkering,
     record_sample,
+    delete_sample,
     update_alert,
     reset_demo,
 )
@@ -426,18 +427,59 @@ The BHI is a screening score only and does not certify fuel suitability.
         except ValueError as ex:
             st.error(str(ex))
 
-    history = pd.DataFrame(
-        rows(
-            cn,
-            "SELECT taken_at AS Sampled, sample_ref AS Sample, laboratory AS Laboratory, water AS Water_mgkg, tan AS TAN, oxidation AS Oxidation_h, bhi AS BHI, status AS Status FROM samples WHERE tank_id=? ORDER BY id DESC",
-            (t["id"],),
-        )
+    sample_rows = rows(
+        cn,
+        "SELECT id, taken_at, sample_ref, laboratory, water, tan, oxidation, bhi, status "
+        "FROM samples WHERE tank_id=? ORDER BY id DESC",
+        (t["id"],),
     )
     st.markdown("#### Tank-sample history")
-    dataframe_or_message(history, "No tank-sample results yet.")
-    if len(history) > 1:
-        chart = history.iloc[::-1].copy().set_index("Sampled")
-        st.line_chart(chart["BHI"])
+    if not sample_rows:
+        st.info("No tank-sample results yet.")
+    else:
+        history = pd.DataFrame(sample_rows).rename(columns={
+            "id": "Record ID", "taken_at": "Sampled", "sample_ref": "Sample",
+            "laboratory": "Laboratory", "water": "Water (mg/kg)",
+            "tan": "TAN", "oxidation": "Oxidation (h)",
+            "bhi": "BHI", "status": "Status",
+        })
+        st.dataframe(history, use_container_width=True, hide_index=True)
+        if len(history) > 1:
+            chart = history.iloc[::-1].copy().set_index("Sampled")
+            st.line_chart(chart["BHI"])
+
+        with st.expander("Correct a mistaken entry — delete a sample", expanded=False):
+            st.caption("Select the exact record ID. Duplicate sample references are allowed; only the selected row will be removed.")
+            sample_ids = [r["id"] for r in sample_rows]
+            selected_id = st.selectbox(
+                "Sample record to delete",
+                sample_ids,
+                format_func=lambda sid: next(
+                    f"#{r['id']} · {r['taken_at']} · {r['sample_ref']} · "
+                    f"BHI {r['bhi']:.2f} · oxidation {r['oxidation']:.2f} h"
+                    for r in sample_rows if r["id"] == sid
+                ),
+                key=f"delete_sample_{t['id']}",
+            )
+            confirmation = st.checkbox(
+                "I understand this permanently deletes the selected sample record",
+                key=f"delete_confirm_{t['id']}_{selected_id}",
+            )
+            if st.button(
+                "Delete selected sample",
+                type="secondary",
+                disabled=not confirmation,
+                key=f"delete_button_{t['id']}",
+            ):
+                try:
+                    deleted_alerts = delete_sample(cn, sample_id=selected_id, tank_id=t["id"])
+                    st.success(
+                        f"Deleted sample record #{selected_id}. "
+                        f"Removed {deleted_alerts} linked alert(s). Older unlinked alerts are unchanged."
+                    )
+                    st.rerun()
+                except ValueError as ex:
+                    st.error(str(ex))
 
 elif page == "5 · Alerts & exports":
     st.subheader("Step 5 — Alerts and Power BI exports")

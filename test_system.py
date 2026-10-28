@@ -1,5 +1,5 @@
 import os, tempfile, unittest
-from fleet_db import connect,seed,rows,record_check,record_bunkering,record_sample,update_alert,tank,reset_demo
+from fleet_db import connect,seed,rows,record_check,record_bunkering,record_sample,update_alert,tank,reset_demo,delete_sample
 from core import mcda_weights,ILLUSTRATIVE_LIMITS
 
 class IntegratedTests(unittest.TestCase):
@@ -57,6 +57,41 @@ class IntegratedTests(unittest.TestCase):
     def test_limit_breach_alert(self):
         _,res=record_sample(self.cn,vessel='TG02',tank_id=self.t['id'],taken_at='2026-10-27',ref='S',laboratory='Demo lab',method_ref='Demo methods',water=600,tan=.3,oxidation=10,limits=ILLUSTRATIVE_LIMITS,weights=mcda_weights(),notes='')
         self.assertIn('Water',res['breaches']);self.assertEqual(len(rows(self.cn,'SELECT * FROM alerts')),1)
+    def test_delete_only_selected_duplicate_reference(self):
+        args=dict(vessel='TG02', tank_id=self.t['id'], taken_at='2026-10-28',
+                  ref='TG01-01', laboratory='Demo lab', method_ref='TEST',
+                  water=250, tan=0.2, limits=ILLUSTRATIVE_LIMITS,
+                  weights=mcda_weights(), notes='synthetic')
+        first,_=record_sample(self.cn,oxidation=9,**args)
+        second,_=record_sample(self.cn,oxidation=5,**args)
+        self.assertEqual(len(rows(self.cn,'SELECT * FROM samples')),2)
+        self.assertEqual(len(rows(self.cn,'SELECT * FROM alerts')),1)
+        self.assertEqual(delete_sample(self.cn,sample_id=second,tank_id=self.t['id']),1)
+        existing=rows(self.cn,'SELECT * FROM samples')
+        self.assertEqual(len(existing),1)
+        self.assertEqual(existing[0]['id'],first)
+        self.assertEqual(len(rows(self.cn,'SELECT * FROM alerts')),0)
+
+    def test_delete_wrong_tank_rejected(self):
+        sample_id,_=record_sample(self.cn,vessel='TG02',tank_id=self.t['id'],
+          taken_at='2026-10-28',ref='S1',laboratory='L',method_ref='M',
+          water=100,tan=.1,oxidation=11,limits=ILLUSTRATIVE_LIMITS,
+          weights=mcda_weights(),notes='')
+        other=rows(self.cn,"SELECT * FROM tanks WHERE vessel_id='TG03' LIMIT 1")[0]
+        with self.assertRaises(ValueError):
+            delete_sample(self.cn,sample_id=sample_id,tank_id=other['id'])
+        self.assertEqual(len(rows(self.cn,'SELECT * FROM samples')),1)
+
+    def test_existing_db_migration(self):
+        import sqlite3
+        path=os.path.join(self.f.name,'legacy.db')
+        c=sqlite3.connect(path)
+        c.execute("CREATE TABLE alerts(id INTEGER PRIMARY KEY, vessel_id TEXT, tank_id INTEGER, created_at TEXT, category TEXT, severity TEXT, details TEXT, status TEXT, owner TEXT, action TEXT, closed_at TEXT)")
+        c.commit(); c.close()
+        upgraded=connect(path)
+        self.assertIn('sample_id',[x[1] for x in upgraded.execute('PRAGMA table_info(alerts)')])
+        upgraded.close()
+
     def test_alert_close_requires_action(self):
         self.cn.execute("INSERT INTO alerts(vessel_id,created_at,category,severity,details,status) VALUES('TG01','x','Demo','Review','x','Open')")
         aid=rows(self.cn,'SELECT * FROM alerts')[0]['id']

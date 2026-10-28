@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS vessels(id TEXT PRIMARY KEY, description TEXT, approv
 CREATE TABLE IF NOT EXISTS tanks(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,name TEXT NOT NULL,capacity_l REAL NOT NULL,volume_l REAL NOT NULL,blend_pct REAL NOT NULL,age_days REAL NOT NULL,updated_at TEXT NOT NULL, UNIQUE(vessel_id,name));
 CREATE TABLE IF NOT EXISTS bunkerings(id INTEGER PRIMARY KEY AUTOINCREMENT, vessel_id TEXT NOT NULL,tank_id INTEGER NOT NULL,created_at TEXT NOT NULL, supplier TEXT, coq_ref TEXT, bdn_ref TEXT, sample_ref TEXT, incoming_blend REAL, delivered_l REAL, rob_l REAL, old_blend REAL, resulting_blend REAL, resulting_age REAL, approval_ref TEXT, compat_evidence TEXT, reviewer TEXT, notes TEXT);
 CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY AUTOINCREMENT, vessel_id TEXT NOT NULL,tank_id INTEGER NOT NULL,taken_at TEXT NOT NULL, entered_at TEXT NOT NULL, sample_ref TEXT, laboratory TEXT, method_ref TEXT, water REAL, tan REAL, oxidation REAL, bhi REAL, status TEXT, weight_model TEXT, limit_profile TEXT, notes TEXT);
-CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,category TEXT NOT NULL,severity TEXT NOT NULL,details TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Open',owner TEXT,action TEXT,closed_at TEXT);
+CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,category TEXT NOT NULL,severity TEXT NOT NULL,details TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Open',owner TEXT,action TEXT,closed_at TEXT,sample_id INTEGER);
 CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,incoming_blend REAL,planned_l REAL,coq_ref TEXT,approved INTEGER,compatible INTEGER,approval_ref TEXT,reviewer TEXT,notes TEXT,review_status TEXT);
 '''
 
@@ -19,6 +19,11 @@ def connect(path='fleet_demo.db'):
     cn.row_factory=sqlite3.Row
     cn.execute('PRAGMA foreign_keys=ON')
     cn.executescript(SCHEMA)
+    # Upgrade existing demo databases without discarding saved records.
+    columns = {r[1] for r in cn.execute('PRAGMA table_info(alerts)')}
+    if 'sample_id' not in columns:
+        cn.execute('ALTER TABLE alerts ADD COLUMN sample_id INTEGER')
+        cn.commit()
     return cn
 
 def seed(cn):
@@ -81,8 +86,24 @@ def record_sample(cn,*,vessel,tank_id,taken_at,ref,laboratory,method_ref,water,t
     with cn:
         cur=cn.execute('''INSERT INTO samples(vessel_id,tank_id,taken_at,entered_at,sample_ref,laboratory,method_ref,water,tan,oxidation,bhi,status,weight_model,limit_profile,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(vessel,tank_id,taken_at,now(),ref,laboratory,method_ref,water,tan,oxidation,result['score'],result['status'],str(weights),str(limits),notes))
         if result['status']!='SCREENING NORMAL':
-            cn.execute('INSERT INTO alerts(vessel_id,tank_id,created_at,category,severity,details,status) VALUES(?,?,?,?,?,?,?)',(vessel,tank_id,now(),'Fuel quality','Priority' if result['breaches'] else 'Review',f"Sample {ref}: {result['status']}; BHI {result['score']:.1f}; breaches {', '.join(result['breaches']) or 'none'}. Requires superintendent assessment.",'Open'))
+            cn.execute('INSERT INTO alerts(vessel_id,tank_id,created_at,category,severity,details,status,sample_id) VALUES(?,?,?,?,?,?,?,?)',(vessel,tank_id,now(),'Fuel quality','Priority' if result['breaches'] else 'Review',f"Sample {ref}: {result['status']}; BHI {result['score']:.1f}; breaches {', '.join(result['breaches']) or 'none'}. Requires superintendent assessment.",'Open',cur.lastrowid))
         return cur.lastrowid,result
+
+def delete_sample(cn, *, sample_id, tank_id):
+    """Delete exactly one selected tank sample and its explicitly linked alerts.
+
+    Older alerts without a sample_id remain unchanged rather than risk deleting
+    unrelated records that happen to reuse the same sample reference.
+    """
+    with cn:
+        sample = cn.execute('SELECT id FROM samples WHERE id=? AND tank_id=?', (sample_id, tank_id)).fetchone()
+        if sample is None:
+            raise ValueError('Selected sample is not present in this tank')
+        count = cn.execute('SELECT COUNT(*) FROM alerts WHERE sample_id=?', (sample_id,)).fetchone()[0]
+        cn.execute('DELETE FROM alerts WHERE sample_id=?', (sample_id,))
+        cn.execute('DELETE FROM samples WHERE id=? AND tank_id=?', (sample_id, tank_id))
+    return count
+
 
 def update_alert(cn,alert_id,status,owner,action):
     if status not in ('Open','Under review','Closed'): raise ValueError('Invalid status')
