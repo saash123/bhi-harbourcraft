@@ -45,6 +45,6 @@ Replace the repository's old `app.py` and upload `core.py`, `fleet_db.py`, and `
 - Navigate with seven straightforward sections plus **Settings & reset**.
 - Use the sidebar **Reset demo data** shortcut, then open **Settings & reset** to confirm.
 - Reset requires ticking the irreversible-deletion checkbox and typing `RESET`. This clears all demonstration COQ reviews, bunkering records, samples, and alerts and restores five synthetic vessels with ten tanks.
-- TG01 starts at **0 L and 0 days** in each tank to illustrate the first biofuel delivery. TG02–TG05 use **assumed 45/90/150/210-day** initial ages. The figures are not fuel deterioration thresholds.
+- TG01 starts at **0 L and 0 days** in each tank to illustrate the first biofuel delivery. TG02–TG05 use **assumed 10/12/20/35-day** initial ages. The figures are not fuel deterioration thresholds.
 - The app does not ask users to predict or certify a compatible resulting blend. Incoming-grade approval and COQ review remain documented checks. Any calculated mixture composition is for internal bookkeeping only.
 - SQLite reset affects the current shared application database. Use CSV exports to retain demonstration records before resetting. Streamlit Community Cloud storage is not durable production storage.

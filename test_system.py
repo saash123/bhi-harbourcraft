@@ -26,7 +26,7 @@ class IntegratedTests(unittest.TestCase):
         first=rows(self.cn,"SELECT * FROM tanks WHERE vessel_id='TG01' AND name='Port'")[0]
         self.assertEqual(first['volume_l'],0)
         other=rows(self.cn,"SELECT * FROM tanks WHERE vessel_id='TG05' AND name='Port'")[0]
-        self.assertEqual(other['age_days'],210)
+        self.assertEqual(other['age_days'],35)
 
     def test_seed(self):self.assertEqual(len(rows(self.cn,'SELECT * FROM vessels')),5)
     def test_check(self):self.assertEqual(self.review()[1],'Reviewed')
@@ -41,7 +41,7 @@ class IntegratedTests(unittest.TestCase):
         i,_=self.review()
         _,b,a=record_bunkering(self.cn,check_id=i,actual_rob=1000,actual_delivered=800,elapsed_days=10,bdn_ref='BDN1',sample_ref='S1',supplier='S',notes='')
         self.assertAlmostEqual(b,(1000*20+800*50)/1800)
-        self.assertAlmostEqual(a,1000*55/1800)
+        self.assertAlmostEqual(a,1000*20/1800)
         self.assertAlmostEqual(tank(self.cn,self.t['id'])['volume_l'],1800)
     def test_double_post_block(self):
         i,_=self.review()

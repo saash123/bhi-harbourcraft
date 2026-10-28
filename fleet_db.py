@@ -29,7 +29,7 @@ def seed(cn):
             for t in ('Port','Starboard'):
                 # TG01 starts before its first biofuel delivery (empty synthetic receiving tanks).
                 # The other vessels demonstrate different pre-existing synthetic residence ages.
-                starting_age = {'TG01': 0, 'TG02': 45, 'TG03': 90, 'TG04': 150, 'TG05': 210}[v]
+                starting_age = {'TG01': 0, 'TG02': 10, 'TG03': 12, 'TG04': 20, 'TG05': 35}[v]
                 starting_volume = 0 if v == 'TG01' else 1000
                 cn.execute('INSERT INTO tanks(vessel_id,name,capacity_l,volume_l,blend_pct,age_days,updated_at) VALUES(?,?,?,?,?,?,?)',
                            (v,t,5000,starting_volume,0 if v == 'TG01' else 20,starting_age,now()))
