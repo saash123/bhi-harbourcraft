@@ -50,9 +50,10 @@ try:
         f"Supabase connection successful: {vessel_count} vessels found."
     )
 
-except Exception as e:
-    st.error(f"Supabase connection test failed: {type(e).__name__}")
-
+except psycopg.OperationalError as e:
+    st.error("Supabase connection failed. Check the application logs for details.")
+    import logging
+    logging.exception("PostgreSQL connection test failed")
 
 CSS = """
 <style>
