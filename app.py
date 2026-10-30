@@ -33,6 +33,27 @@ from fleet_db import (
 
 st.set_page_config(page_title="BHI Fleet Monitor", layout="wide", page_icon="⚓")
 
+# Temporary Supabase connection test
+import psycopg
+
+try:
+    with psycopg.connect(
+        st.secrets["database"]["url"],
+        sslmode="require",
+        connect_timeout=10
+    ) as test_conn:
+        with test_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM vessels")
+            vessel_count = cur.fetchone()[0]
+
+    st.success(
+        f"Supabase connection successful: {vessel_count} vessels found."
+    )
+
+except Exception as e:
+    st.error(f"Supabase connection test failed: {type(e).__name__}")
+
+
 CSS = """
 <style>
 .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
