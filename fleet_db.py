@@ -1,50 +1,97 @@
-"""SQLite demonstration datastore, synthetic entries only."""
-import sqlite3
-from datetime import datetime, timezone
-from pathlib import Path
+"""Supabase PostgreSQL datastore for the BHI research demonstrator.
 
-SCHEMA = '''
-CREATE TABLE IF NOT EXISTS vessels(id TEXT PRIMARY KEY, description TEXT, approved_max_fame REAL);
-CREATE TABLE IF NOT EXISTS tanks(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,name TEXT NOT NULL,capacity_l REAL NOT NULL,volume_l REAL NOT NULL,blend_pct REAL NOT NULL,age_days REAL NOT NULL,updated_at TEXT NOT NULL, UNIQUE(vessel_id,name));
-CREATE TABLE IF NOT EXISTS bunkerings(id INTEGER PRIMARY KEY AUTOINCREMENT, vessel_id TEXT NOT NULL,tank_id INTEGER NOT NULL,created_at TEXT NOT NULL, supplier TEXT, coq_ref TEXT, bdn_ref TEXT, sample_ref TEXT, incoming_blend REAL, delivered_l REAL, rob_l REAL, old_blend REAL, resulting_blend REAL, resulting_age REAL, approval_ref TEXT, compat_evidence TEXT, reviewer TEXT, notes TEXT, previous_age REAL, previous_updated_at TEXT);
-CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY AUTOINCREMENT, vessel_id TEXT NOT NULL,tank_id INTEGER NOT NULL,taken_at TEXT NOT NULL, entered_at TEXT NOT NULL, sample_ref TEXT, laboratory TEXT, method_ref TEXT, water REAL, tan REAL, oxidation REAL, bhi REAL, status TEXT, weight_model TEXT, limit_profile TEXT, notes TEXT);
-CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,category TEXT NOT NULL,severity TEXT NOT NULL,details TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Open',owner TEXT,action TEXT,closed_at TEXT,sample_id INTEGER, bunkering_id INTEGER);
-CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY AUTOINCREMENT,vessel_id TEXT NOT NULL,tank_id INTEGER,created_at TEXT NOT NULL,incoming_blend REAL,planned_l REAL,coq_ref TEXT,approved INTEGER,compatible INTEGER,approval_ref TEXT,reviewer TEXT,notes TEXT,review_status TEXT);
-'''
+Connects to the existing imported tables. No CREATE, DROP or automatic seed.
+"""
+from datetime import datetime, timezone, date
+from decimal import Decimal
+import psycopg
+import streamlit as st
 
-def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
-def connect(path='fleet_demo.db'):
-    cn=sqlite3.connect(str(path),check_same_thread=False)
-    cn.row_factory=sqlite3.Row
-    cn.execute('PRAGMA foreign_keys=ON')
-    cn.executescript(SCHEMA)
-    # Upgrade existing demo databases without discarding saved records.
-    columns = {r[1] for r in cn.execute('PRAGMA table_info(alerts)')}
-    if 'sample_id' not in columns:
-        cn.execute('ALTER TABLE alerts ADD COLUMN sample_id INTEGER')
-        cn.commit()
-    bunk_cols = {r[1] for r in cn.execute('PRAGMA table_info(bunkerings)')}
-    for name, dtype in [('previous_age', 'REAL'), ('previous_updated_at', 'TEXT')]:
-        if name not in bunk_cols:
-            cn.execute(f'ALTER TABLE bunkerings ADD COLUMN {name} {dtype}')
-    if 'bunkering_id' not in {r[1] for r in cn.execute('PRAGMA table_info(alerts)')}:
-        cn.execute('ALTER TABLE alerts ADD COLUMN bunkering_id INTEGER')
-    cn.commit()
-    return cn
+class HybridRow(dict):
+    """Access fetched records by column name or positional index (SQLite-compatible)."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+def hybrid_row(cursor):
+    columns = [c.name for c in (cursor.description or ())]
+
+    def make_row(values):
+        normalized = []
+        for v in values:
+            if isinstance(v, Decimal):
+                v = float(v)
+            elif isinstance(v, (datetime, date)):
+                v = v.isoformat()
+            normalized.append(v)
+        return HybridRow(zip(columns, normalized))
+    return make_row
+
+
+class QueryResult:
+    def __init__(self, cursor, lastrowid=None):
+        self.cursor = cursor
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        return self.cursor.fetchone()
+
+    def fetchall(self):
+        return self.cursor.fetchall()
+
+
+class Database:
+    """Minimal adapter for existing SQLite-style calls used in app.py."""
+    def __init__(self, connection):
+        self.connection = connection
+        self._transaction = None
+
+    def execute(self, sql, params=()):
+        # psycopg's percent placeholders require escaping literal SQL % symbols.
+        statement = sql.replace('%', '%%').replace('?', '%s')
+        is_insert = statement.lstrip().upper().startswith('INSERT INTO ')
+        if is_insert and ' RETURNING ' not in statement.upper():
+            statement = statement.rstrip().rstrip(';') + ' RETURNING id'
+        cur = self.connection.execute(statement, params)
+        if is_insert:
+            created = cur.fetchone()
+            return QueryResult(cur, created['id'] if created else None)
+        return QueryResult(cur)
+
+    def __enter__(self):
+        self._transaction = self.connection.transaction()
+        self._transaction.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return self._transaction.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._transaction = None
+
+    def close(self):
+        self.connection.close()
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def connect(path=None):
+    """Connect to existing Supabase tables. `path` retained for app compatibility."""
+    url = st.secrets['database']['url']
+    cn = psycopg.connect(url, sslmode='require', connect_timeout=10,
+                         row_factory=hybrid_row, autocommit=True)
+    return Database(cn)
+
 
 def seed(cn):
-    if cn.execute('SELECT count(*) FROM vessels').fetchone()[0]: return
-    with cn:
-        for v,maxb in [('TG01',50),('TG02',100),('TG03',30),('TG04',100),('TG05',50)]:
-            cn.execute('INSERT INTO vessels VALUES(?,?,?)',(v,'Synthetic harbour tug',maxb))
-            for t in ('Port','Starboard'):
-                # TG01 starts before its first biofuel delivery (empty synthetic receiving tanks).
-                # The other vessels demonstrate different pre-existing synthetic residence ages.
-                starting_age = {'TG01': 0, 'TG02': 10, 'TG03': 12, 'TG04': 20, 'TG05': 35}[v]
-                starting_volume = 0 if v == 'TG01' else 1000
-                cn.execute('INSERT INTO tanks(vessel_id,name,capacity_l,volume_l,blend_pct,age_days,updated_at) VALUES(?,?,?,?,?,?,?)',
-                           (v,t,5000,starting_volume,0 if v == 'TG01' else 20,starting_age,now()))
+    """Do not reseed Supabase: existing imported data is authoritative."""
+    return
+
 
 def rows(cn,query,args=()): return [dict(x) for x in cn.execute(query,args).fetchall()]
 
@@ -155,10 +202,5 @@ def update_alert(cn,alert_id,status,owner,action):
 
 
 def reset_demo(cn):
-    """Restore synthetic starter records in a single transaction; never delete schema."""
-    with cn:
-        for table in ('alerts', 'samples', 'bunkerings', 'checks', 'tanks', 'vessels'):
-            cn.execute(f'DELETE FROM {table}')
-    seed(cn)
-    return {'vessels': cn.execute('SELECT COUNT(*) FROM vessels').fetchone()[0],
-            'tanks': cn.execute('SELECT COUNT(*) FROM tanks').fetchone()[0]}
+    """Destructive reset is intentionally unavailable for the persistent database."""
+    raise ValueError('Supabase reset is disabled to protect your recovered fleet data.')

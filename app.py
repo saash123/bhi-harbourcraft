@@ -1,5 +1,4 @@
 """Simplified BHI fleet monitor — synthetic research demonstrator only."""
-import os
 import io
 import zipfile
 from datetime import date
@@ -33,28 +32,6 @@ from fleet_db import (
 
 st.set_page_config(page_title="BHI Fleet Monitor", layout="wide", page_icon="⚓")
 
-# Temporary Supabase connection test
-import psycopg
-
-try:
-    with psycopg.connect(
-        st.secrets["database"]["url"],
-        sslmode="require",
-        connect_timeout=10
-    ) as test_conn:
-        with test_conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM vessels")
-            vessel_count = cur.fetchone()[0]
-
-    st.success(
-        f"Supabase connection successful: {vessel_count} vessels found."
-    )
-
-except psycopg.OperationalError as e:
-    st.error("Supabase connection failed. Check the application logs for details.")
-    import logging
-    logging.exception("PostgreSQL connection test failed")
-
 CSS = """
 <style>
 .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
@@ -85,8 +62,7 @@ CSS = """
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-DB_PATH = os.environ.get("BHI_DB_PATH", "fleet_demo.db")
-cn = connect(DB_PATH)
+cn = connect()
 seed(cn)
 weights = mcda_weights()
 limits = ILLUSTRATIVE_LIMITS.copy()
@@ -153,17 +129,13 @@ with st.sidebar:
     st.caption("Keep real vessel approvals and actual marine-fuel specifications under qualified review.")
     st.divider()
     st.caption("Demo controls")
-    if st.button("Reset demo data", use_container_width=True, help="Opens reset confirmation; no data is removed yet."):
+    if st.button("Reset demo data", disabled=True, use_container_width=True, help="Disabled to protect the persistent Supabase data."):
         st.session_state["page_reset_requested"] = True
 
 
-if st.session_state.pop("page_reset_requested", False):
-    st.session_state["show_reset_dialog"] = True
 
 st.title("Biofuel Health Index · Fleet Management")
 st.caption("Bunkering records • fuel-age tracking • tank samples • alerts | DEMONSTRATION DATA")
-if st.session_state.get("show_reset_dialog", False):
-    st.warning("**Reset requested:** Open **Settings & reset** in the navigation, review the warning and confirm there. No records have been deleted.")
 st.markdown(
     """
 <div class="hero-box">
@@ -598,22 +570,8 @@ elif page == "5 · Alerts & exports":
 
 elif page == "Settings & reset":
     st.subheader("Settings & reset")
-    st.markdown("### Restore the demonstration fleet")
-    st.write("Resetting removes **all saved bunkering reviews, deliveries, tank samples and alerts** from this demonstration database, then recreates the five sample vessels.")
-    st.info("**New starting condition:** TG01 has 0 L biodiesel ROB (first delivery not started). TG02, TG03, TG04 and TG05 have assumed synthetic effective ages of 45, 90, 150 and 210 days, respectively. All tanks have a simulated capacity of 5,000 L.")
-    st.warning("This reset affects the shared demo database used by this running application. Download exports before resetting if you need to keep your results. The operation cannot be undone.")
-    with st.form("confirm_reset_form"):
-        understood = st.checkbox("I understand that the current demonstration records will be permanently deleted.")
-        reset_text = st.text_input("Type RESET to confirm", value="")
-        confirmed = st.form_submit_button("Reset all demo records", type="primary", use_container_width=True)
-    if confirmed:
-        if understood and reset_text.strip() == "RESET":
-            counts = reset_demo(cn)
-            st.session_state["show_reset_dialog"] = False
-            st.success(f"Demo reset complete. {counts['vessels']} vessels and {counts['tanks']} tanks restored to their starting conditions.")
-            st.info("Open **Overview** or **1 · Pre-bunkering** to start a fresh scenario.")
-        else:
-            st.error("Reset cancelled. Select the confirmation checkbox and type RESET exactly.")
+    st.warning("Reset is disabled while the application uses the persistent Supabase database.")
+    st.info("Your imported fleet records are retained. Download a ZIP backup from Alerts & exports before any future database maintenance.")
 
 elif page == "6 · Scientific basis":
     st.subheader("Step 6 — Scientific basis")
