@@ -32,48 +32,88 @@ def hybrid_row(cursor):
 
 
 class QueryResult:
-    def __init__(self, cursor, lastrowid=None):
-        self.cursor = cursor
+    """Materialised result: rows remain readable after the connection closes."""
+    def __init__(self, records=(), lastrowid=None):
+        self._records = list(records)
+        self._position = 0
         self.lastrowid = lastrowid
 
     def fetchone(self):
-        return self.cursor.fetchone()
+        if self._position >= len(self._records):
+            return None
+        value = self._records[self._position]
+        self._position += 1
+        return value
 
     def fetchall(self):
-        return self.cursor.fetchall()
+        remaining = self._records[self._position:]
+        self._position = len(self._records)
+        return remaining
 
 
 class Database:
-    """Minimal adapter for existing SQLite-style calls used in app.py."""
-    def __init__(self, connection):
-        self.connection = connection
+    """SQLite-style adapter with no leaked idle PostgreSQL sessions.
+
+    Outside transactions, open and close a connection for each statement.
+    Inside `with cn:`, reuse one connection and commit/rollback atomically.
+    """
+    def __init__(self, url):
+        self.url = url
+        self._connection = None
         self._transaction = None
 
-    def execute(self, sql, params=()):
-        # psycopg's percent placeholders require escaping literal SQL % symbols.
+    def _open(self):
+        return psycopg.connect(
+            self.url, sslmode='require', connect_timeout=10,
+            row_factory=hybrid_row, autocommit=True,
+            prepare_threshold=None,
+        )
+
+    def _execute_on(self, connection, sql, params):
+        # Preserve SQLite ? placeholders and escape literal percent signs for psycopg.
         statement = sql.replace('%', '%%').replace('?', '%s')
         is_insert = statement.lstrip().upper().startswith('INSERT INTO ')
         if is_insert and ' RETURNING ' not in statement.upper():
             statement = statement.rstrip().rstrip(';') + ' RETURNING id'
-        cur = self.connection.execute(statement, params)
+        with connection.cursor() as cur:
+            cur.execute(statement, params)
+            records = cur.fetchall() if cur.description else []
         if is_insert:
-            created = cur.fetchone()
-            return QueryResult(cur, created['id'] if created else None)
-        return QueryResult(cur)
+            return QueryResult((), records[0]['id'] if records else None)
+        return QueryResult(records)
+
+    def execute(self, sql, params=()):
+        if self._connection is not None:
+            return self._execute_on(self._connection, sql, params)
+        # A standalone statement never keeps a connection alive across reruns.
+        with self._open() as connection:
+            return self._execute_on(connection, sql, params)
 
     def __enter__(self):
-        self._transaction = self.connection.transaction()
-        self._transaction.__enter__()
+        if self._connection is not None:
+            raise RuntimeError('Nested BHI database transactions are unsupported')
+        self._connection = self._open()
+        try:
+            self._transaction = self._connection.transaction()
+            self._transaction.__enter__()
+        except BaseException:
+            self._connection.close()
+            self._connection = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             return self._transaction.__exit__(exc_type, exc_value, traceback)
         finally:
+            self._connection.close()
+            self._connection = None
             self._transaction = None
 
     def close(self):
-        self.connection.close()
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
 
 
 def now():
@@ -81,11 +121,8 @@ def now():
 
 
 def connect(path=None):
-    """Connect to existing Supabase tables. `path` retained for app compatibility."""
-    url = st.secrets['database']['url']
-    cn = psycopg.connect(url, sslmode='require', connect_timeout=10,
-                         row_factory=hybrid_row, autocommit=True)
-    return Database(cn)
+    """Connect lazily to the existing Supabase tables; never seed or reset."""
+    return Database(st.secrets['database']['url'])
 
 
 def seed(cn):
